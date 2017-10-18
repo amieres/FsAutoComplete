@@ -289,6 +289,29 @@ type Commands (serialize : Serializer) =
                     return Response.symbolUse serialize (sym, symbols)
                 else
                     let! symbols = checker.GetUsesOfSymbol (fn, state.FileCheckOptions.ToSeq(), sym.Symbol)
+                    let! declaration =
+                        sym.Symbol.DeclarationLocation
+                        |> Option.map (fun s ->
+                            let fn = Path.GetFullPath s.FileName
+                            match state.TryGetFileCheckerOptionsWithLines fn with
+                            | Failure _ -> async { return None }
+                            | Success (opts, lines) ->
+                            match checker.TryGetRecentCheckResultsForFile(fn, opts) with
+                            | None -> async { return None }
+                            | Some tyRes ->
+                                async {
+                                    let pos = Pos.make s.StartLine s.StartColumn
+                                    let! res =  tyRes.TryGetSymbolUseAtLocation pos lines.[s.StartLine - 1]
+                                    match res with
+                                    | Failure _ -> return None
+                                    | Success s -> return Some s
+                                }
+                        ) |> Option.getOrElse (async {return None})
+                    let symbols =
+                        match declaration with
+                        | Some s -> symbols |> Array.append [|s|]
+                        | None -> symbols
+
                     return Response.symbolUse serialize (sym, symbols)
             })
         |> x.AsCancellable (Path.GetFullPath fn)
@@ -442,7 +465,7 @@ type Commands (serialize : Serializer) =
                 return [Response.info serialize "Union at position not found"]
         } |> x.AsCancellable (Path.GetFullPath tyRes.FileName)
 
-    member x.WorkspacePeek (dir: string) (deep: int) (excludedDirs: string list) = async {
+    member __.WorkspacePeek (dir: string) (deep: int) (excludedDirs: string list) = async {
         let d = WorkspacePeek.peek dir deep excludedDirs
 
         return [Response.workspacePeek serialize d]

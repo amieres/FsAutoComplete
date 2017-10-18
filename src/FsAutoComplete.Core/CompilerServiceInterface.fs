@@ -83,6 +83,19 @@ type ParseAndCheckResults
         | _ -> Success(tip)
   }
 
+  member __.TryGetSymbolUseAtLocation (pos: Pos) (lineStr: LineStr) =
+    async {
+        match Parsing.findLongIdents(pos.Col - 1, lineStr) with
+        | None -> return (Failure "No ident at this location")
+        | Some(colu, identIsland) ->
+
+        let! symboluse = checkResults.GetSymbolUseAtLocation(pos.Line, colu, lineStr, identIsland)
+        match symboluse with
+        | None -> return (Failure "No symbol information found")
+        | Some symboluse ->
+          return Success symboluse
+    }
+
   member __.TryGetSymbolUse (pos: Pos) (lineStr: LineStr) =
     async {
         match Parsing.findLongIdents(pos.Col - 1, lineStr) with
@@ -235,11 +248,12 @@ type FSharpCompilerServiceChecker() =
 
   let getDependingProjects file (options : seq<string * FSharpProjectOptions>) =
     let project = options |> Seq.tryFind (fun (k,_) -> k = file)
-    project |> Option.map (fun (name, option) ->
+    let options = options |> Seq.distinctBy (fun (_,v) -> v.ProjectFileName)
+    project |> Option.map (fun (_, option) ->
       [
         yield! options
                |> Seq.map snd
-               |> Seq.filter (fun o -> o.ReferencedProjects |> Array.map (fun (k,v) -> v.ProjectFileName) |> Array.contains option.ProjectFileName )
+               |> Seq.filter (fun o -> o.ReferencedProjects |> Array.map (fun (_,v) -> Path.GetFullPath v.ProjectFileName) |> Array.contains (Path.GetFullPath option.ProjectFileName) )
         yield option
       ])
 
