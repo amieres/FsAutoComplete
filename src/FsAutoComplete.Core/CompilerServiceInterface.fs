@@ -53,8 +53,9 @@ type ParseAndCheckResults
     match Parsing.findLongIdents(pos.Col - 1, lineStr) with
     | None -> return Failure "Could not find ident at this location"
     | Some(col, identIsland) ->
-
+      printfn "Find declaration: %A" (pos, col, lineStr, identIsland)
       let! declarations = checkResults.GetDeclarationLocation(pos.Line, col, lineStr, identIsland, false)
+      printfn "%A" declarations
 
       match declarations with
       | FSharpFindDeclResult.DeclNotFound _ -> return Failure "Could not find declaration"
@@ -265,8 +266,13 @@ type FSharpCompilerServiceChecker() =
 
   member __.GetProjectOptionsFromScript(file, source) = async {
     let! (rawOptions, _) = checker.GetProjectOptionsFromScript(file, source)
+    let config    =
+        let n = source.IndexOf("\n")
+        if  n > 5 && source.StartsWith "////-d:" then source.Substring(4, n - 4) else ""
+    let  defines  = if config <> "" then config.Split ' ' else [||]
     let opts =
       rawOptions.OtherOptions
+      |> Array.append defines
       |> ensureCorrectFSharpCore
       |> ensureCorrectVersions
 
@@ -300,6 +306,8 @@ type FSharpCompilerServiceChecker() =
     checker.FileChecked
 
   member __.ParseAndCheckFileInProject(filePath, version, source, options) =
+    let parse f = checker.ParseAndCheckFileInProject (f, version, source, options, null) //TODO: Add cancelation again
+
     async {
       debug "[LanguageService] ParseAndCheckFileInProject - enter"
       fileChanged filePath version
@@ -318,7 +326,7 @@ type FSharpCompilerServiceChecker() =
 
                debug "[LanguageService] Change state for %s to `BeingChecked`" filePath
                debug "[LanguageService] Parse and typecheck source..."
-               return! checker.ParseAndCheckFileInProject (fixedFilePath, version, source, options, null) //TODO: Add cancelation again
+               return! parse fixedFilePath //checker.ParseAndCheckFileInProject (fixedFilePath, version, source, options, null) //TODO: Add cancelation again
           finally
                match files.TryGetValue filePath with
                | true, (v, BeingChecked)

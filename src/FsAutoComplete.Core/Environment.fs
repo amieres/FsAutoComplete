@@ -68,7 +68,9 @@ module Environment =
   let private fsharpInstallationPath =
     ["4.1"; "4.0"; "3.1"; "3.0"]
     |> List.map (fun v -> programFilesX86 </> @"\Microsoft SDKs\F#\" </> v </> @"\Framework\v4.0")
+    |> List.append [ @"packages\FSharp.Compiler.Tools\tools" ; @"..\packages\FSharp.Compiler.Tools\tools" ]
     |> List.tryFind Directory.Exists
+    |> Option.map   Path.GetFullPath
 
   let fsi =
     if Utils.runningOnMono then "fsharpi"
@@ -91,7 +93,10 @@ module Environment =
       let referenceAssembliesPath =
         programFilesX86 </> @"Reference Assemblies\Microsoft\FSharp\.NETFramework\v4.0\"
       let fsharpCoreVersions = ["4.4.1.0"; "4.4.0.0"; "4.3.1.0"; "4.3.0.0"]
-      tryFindFile (List.map (combinePaths referenceAssembliesPath) fsharpCoreVersions) "FSharp.Core.dll"
+      List.map (combinePaths referenceAssembliesPath) fsharpCoreVersions
+      |> List.append [ @"packages\FSharp.Compiler.Tools\tools" ; @"..\packages\FSharp.Compiler.Tools\tools" ]
+      |> tryFindFile <| "FSharp.Core.dll"
+      |> Option.map Path.GetFullPath
 
   let referenceAssembliesPath =
      programFilesX86 </> @"Reference Assemblies\Microsoft\Framework\.NETFramework"
