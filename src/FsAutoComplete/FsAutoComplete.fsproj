@@ -25,6 +25,7 @@
     <RemoteDebugEnabled>true</RemoteDebugEnabled>
     <RemoteDebugMachine>DESKTOP-03AIBRQ:4022</RemoteDebugMachine>
     <UseVSHostingProcess>true</UseVSHostingProcess>
+    <StartArguments>--mode http</StartArguments>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
     <DebugType>pdbonly</DebugType>

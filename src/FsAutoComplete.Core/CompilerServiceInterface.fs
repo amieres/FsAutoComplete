@@ -53,9 +53,8 @@ type ParseAndCheckResults
     match Parsing.findLongIdents(pos.Col - 1, lineStr) with
     | None -> return Failure "Could not find ident at this location"
     | Some(col, identIsland) ->
-      printfn "Find declaration: %A" (pos, col, lineStr, identIsland)
+
       let! declarations = checkResults.GetDeclarationLocation(pos.Line, col, lineStr, identIsland, false)
-      printfn "%A" declarations
 
       match declarations with
       | FSharpFindDeclResult.DeclNotFound _ -> return Failure "Could not find declaration"
@@ -195,27 +194,7 @@ type FSharpCompilerServiceChecker() =
       keepAllBackgroundResolutions = false,
       keepAssemblyContents = true)
 
-  let files = ConcurrentDictionary<string, Version * FileState>()
   do checker.BeforeBackgroundFileCheck.Add ignore
-
-  let isResultObsolete fileName =
-      match files.TryGetValue fileName with
-      | true, (_, Cancelled) -> true
-      | _ -> false
-
-  let fileChanged filePath version =
-    files.AddOrUpdate (filePath, (version, NeedChecking), (fun _ (oldVersion, oldState) ->
-        if version <> oldVersion then
-           (version,
-            match oldState with
-            | BeingChecked -> Cancelled
-            | Cancelled -> Cancelled
-            | NeedChecking -> NeedChecking
-            | Checked -> NeedChecking)
-        else oldVersion, oldState))
-    |> debug "[LanguageService] %s changed: set status to %A" filePath
-
-
   let fixFileName path =
     if (try Path.GetFullPath path |> ignore; true with _ -> false) then path
     else
@@ -266,13 +245,8 @@ type FSharpCompilerServiceChecker() =
 
   member __.GetProjectOptionsFromScript(file, source) = async {
     let! (rawOptions, _) = checker.GetProjectOptionsFromScript(file, source)
-    let config    =
-        let n = source.IndexOf("\n")
-        if  n > 5 && source.StartsWith "////-d:" then source.Substring(4, n - 4) else ""
-    let  defines  = if config <> "" then config.Split ' ' else [||]
     let opts =
       rawOptions.OtherOptions
-      |> Array.append defines
       |> ensureCorrectFSharpCore
       |> ensureCorrectVersions
 
@@ -305,37 +279,13 @@ type FSharpCompilerServiceChecker() =
   member __.FileChecked =
     checker.FileChecked
 
+  member __.ParseFile =
+    checker.ParseFile
+
   member __.ParseAndCheckFileInProject(filePath, version, source, options) =
-    let parse f = checker.ParseAndCheckFileInProject (f, version, source, options, null) //TODO: Add cancelation again
-
     async {
-      debug "[LanguageService] ParseAndCheckFileInProject - enter"
-      fileChanged filePath version
       let fixedFilePath = fixFileName filePath
-      let! res = Async.Catch (async {
-          try
-               // wait until the previous checking completed
-               while files.ContainsKey filePath &&
-                     (match files.TryGetValue filePath with
-                      | true, (v, Checked)
-                      | true, (v, NeedChecking) ->
-                         files.[filePath] <- (v, BeingChecked)
-                         true
-                      | _ -> false) do
-                   do! Async.Sleep 20
-
-               debug "[LanguageService] Change state for %s to `BeingChecked`" filePath
-               debug "[LanguageService] Parse and typecheck source..."
-               return! parse fixedFilePath //checker.ParseAndCheckFileInProject (fixedFilePath, version, source, options, null) //TODO: Add cancelation again
-          finally
-               match files.TryGetValue filePath with
-               | true, (v, BeingChecked)
-               | true, (v, Cancelled) -> files.[filePath] <- (v, Checked)
-               | _ -> ()
-      })
-
-      debug "[LanguageService]: Check completed"
-      // Construct new typed parse result if the task succeeded
+      let! res = Async.Catch (checker.ParseAndCheckFileInProject (fixedFilePath, version, source, options, null)) //TODO: Add cancelation again
       return
           match res with
           | Choice1Of2 x -> Success x
@@ -376,23 +326,3 @@ type FSharpCompilerServiceChecker() =
     let! parseResult = checker.ParseFile(fileName, source, options)
     return parseResult.GetNavigationItems().Declarations
   }
-
-  member __.GetDeclarationsInProjects (options : seq<string * FSharpProjectOptions>) =
-      options
-      |> Seq.distinctBy(fun (_, v) -> v.ProjectFileName)
-      |> Seq.map (fun (_, opts) -> async {
-          let! _ = checker.ParseAndCheckProject opts
-          return!
-            options
-            |> Seq.filter (fun (_, projectOpts) -> projectOpts = opts)
-            |> Seq.map (fun (projectFile,_) -> async {
-                let! parseRes, _ = checker.GetBackgroundCheckResultsForFileInProject(projectFile, opts)
-                return (parseRes.GetNavigationItems().Declarations |> Array.map (fun decl -> decl, projectFile))
-              })
-            |> Async.Parallel
-         })
-      |> Async.Parallel
-      |> Async.map (Seq.collect (Seq.collect id) >> Seq.toArray)
-
-
-
