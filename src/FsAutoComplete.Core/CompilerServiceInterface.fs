@@ -245,8 +245,13 @@ type FSharpCompilerServiceChecker() =
 
   member __.GetProjectOptionsFromScript(file, source) = async {
     let! (rawOptions, _) = checker.GetProjectOptionsFromScript(file, source)
+    let config    =
+        let n = source.IndexOf("\n")
+        if  n > 5 && source.StartsWith "////-d:" then source.Substring(4, n - 4) else ""
+    let  defines  = if config <> "" then config.Split ' ' else [||]
     let opts =
       rawOptions.OtherOptions
+      |> Array.append defines
       |> ensureCorrectFSharpCore
       |> ensureCorrectVersions
 
