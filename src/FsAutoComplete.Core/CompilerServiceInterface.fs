@@ -344,11 +344,15 @@ type FSharpCompilerServiceChecker() =
     return { rawOptions with OtherOptions = opts }
 #else
     let! (rawOptions, _) = checker.GetProjectOptionsFromScript(file, source)
-
+    let config    =
+        let n = source.IndexOf("\n")
+        if  n > 5 && source.StartsWith "////-d:" then source.Substring(4, n - 4) else ""
+    let  defines  = if config <> "" then config.Split ' ' else [||]
     let opts =
       rawOptions.OtherOptions
-      |> FSharpCompilerServiceCheckerHelper.ensureCorrectFSharpCore
-      |> FSharpCompilerServiceCheckerHelper.ensureCorrectVersions
+      |> Array.append defines
+      |> ensureCorrectFSharpCore
+      |> ensureCorrectVersions
 
     return { rawOptions with OtherOptions = opts }
 #endif
