@@ -1,35 +1,3 @@
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net461</TargetFramework>
-    <AssemblyName>fsautocomplete</AssemblyName>
-    <ServerGarbageCollection>true</ServerGarbageCollection>
-    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <Compile Include="AssemblyInfo.fs" />
-    <Compile Include="Debug.fs" />
-    <Compile Include="Options.fs" />
-    <Compile Include="CommandInput.fs" />
-    <Compile Include="JsonSerializer.fs" />
-    <Compile Include="FsAutoComplete.Stdio.fs" />
-    <Compile Include="FsAutoComplete.HttpApiContract.fs" />
-    <Compile Include="FsAutoComplete.Suave.fs" />
-    <Compile Include="Program.fs" />
-    <None Include="FsAutoComplete.fsproj.paket.references" />
-    <Content Include="App.config" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\FsAutoComplete.Core\FsAutoComplete.Core.fsproj" />
-    <ProjectReference Include="..\FsAutoComplete.SymbolCache\FsAutoComplete.SymbolCache.fsproj" />
-  </ItemGroup>
-
-  <Import Project="..\..\.paket\Paket.Restore.targets" />
-
-</Project>
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
