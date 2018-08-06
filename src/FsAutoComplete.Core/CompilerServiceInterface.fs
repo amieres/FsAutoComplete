@@ -4,8 +4,12 @@ open System
 open System.IO
 open Microsoft.FSharp.Compiler.SourceCodeServices
 open Utils
-open FsAutoComplete.ProjectRecognizer
 open Microsoft.FSharp.Compiler.Range
+
+[<RequireQualifiedAccess>]
+type FindDeclarationResult =
+    | ExternalDeclaration of Decompiler.ExternalContentPosition
+    | Range of Microsoft.FSharp.Compiler.Range.range
 
 type ParseAndCheckResults
     (
@@ -58,8 +62,11 @@ type ParseAndCheckResults
 
       match declarations with
       | FSharpFindDeclResult.DeclNotFound _ -> return ResultOrString.Error "Could not find declaration"
-      | FSharpFindDeclResult.DeclFound range -> return Ok range
-      | FSharpFindDeclResult.ExternalDecl(assembly, externalSym) -> return ResultOrString.Error "External declaration" //TODO: Handle external declarations
+      | FSharpFindDeclResult.DeclFound range -> return Ok (FindDeclarationResult.Range range)
+      | FSharpFindDeclResult.ExternalDecl (assembly, externalSym) -> 
+            return Decompiler.tryFindExternalDeclaration checkResults (assembly, externalSym)
+                    |> Option.map (fun extDec -> ResultOrString.Ok (FindDeclarationResult.ExternalDeclaration extDec))
+                    |> Option.getOrElse (ResultOrString.Error "External declaration not resolved")
     }
 
   member __.TryFindTypeDeclaration (pos: pos) (lineStr: LineStr) = async {
@@ -114,24 +121,25 @@ type ParseAndCheckResults
       // TODO: Display other tooltip types, for example for strings or comments where appropriate
       let! tip = checkResults.GetToolTipText(pos.Line, col, lineStr, identIsland, FSharpTokenTag.Identifier)
       let! symbol = checkResults.GetSymbolUseAtLocation(pos.Line, col, lineStr, identIsland)
-      return
-        match tip with
-        | FSharpToolTipText(elems) when elems |> List.forall ((=) FSharpToolTipElement.None) ->
-            match identIsland with
-            | [ident] ->
-               KeywordList.tryGetKeywordDescription ident
-               |> Option.map (fun desc -> FSharpToolTipText [FSharpToolTipElement.Single(ident, FSharpXmlDoc.Text desc)])
-               |> function
-               | Some tip -> Ok (tip, ident, "")
-               | None -> Error "No tooltip information"
-            | _ -> Error "No tooltip information"
-        | _ ->
-        match symbol with
-        | None -> Error "No tooltip information"
-        | Some s ->
-          match SignatureFormatter.getTooltipDetailsFromSymbolUse s with
-          | None -> Error "No tooltip information"
-          | Some (s,f) -> Ok (tip, s, f)
+
+      match tip with
+      | FSharpToolTipText(elems) when elems |> List.forall ((=) FSharpToolTipElement.None) && symbol.IsNone ->
+          match identIsland with
+          | [ident] ->
+             let keyword = KeywordList.tryGetKeywordDescription ident
+                           |> Option.map (fun desc -> FSharpToolTipText [FSharpToolTipElement.Single(ident, FSharpXmlDoc.Text desc)])
+             match keyword with
+             | Some tip -> return Ok (tip, ident, "")
+             | None -> return Error "No tooltip information"
+          | _ -> return Error "No tooltip information"
+      | _ ->
+      match symbol with
+      | None -> return Error "No tooltip information"
+      | Some symbol ->
+        match SignatureFormatter.getTooltipDetailsFromSymbolUse symbol with
+        | None -> return Error "No tooltip information"
+        | Some (signature, footer) ->
+            return Ok (tip, signature, footer)
   }
 
   member __.TryGetSymbolUse (pos: pos) (lineStr: LineStr) =
@@ -161,12 +169,22 @@ type ParseAndCheckResults
           let fsym = symboluse.Symbol
           match fsym with
           | :? FSharpMemberOrFunctionOrValue as symbol ->
-            let parms =
-              symbol.CurriedParameterGroups
-              |> Seq.map (Seq.map (fun p -> p.DisplayName, p.Type.Format symboluse.DisplayContext) >> Seq.toList )
-              |> Seq.toList
+
             let typ = symbol.ReturnParameter.Type.Format symboluse.DisplayContext
-            return Ok(typ, parms)
+            if symbol.IsPropertyGetterMethod then
+                return Ok(typ, [])
+            else
+              let parms =
+                symbol.CurriedParameterGroups
+                |> Seq.map (Seq.map (fun p -> p.DisplayName, p.Type.Format symboluse.DisplayContext) >> Seq.toList )
+                |> Seq.toList
+              // Abstract members and abstract member overrides with one () parameter seem have a list with an empty list
+              // as parameters.
+              match parms with
+              | [ [] ] when symbol.IsMember && (not symbol.IsPropertyGetterMethod) ->
+                return Ok(typ, [ [ ("unit", "unit") ] ])
+              | _ ->
+                return Ok(typ, parms)
           | _ ->
             return (ResultOrString.Error "Not a member, function or value" )
     }
@@ -254,6 +272,8 @@ type ParseAndCheckResults
         ]
       with
       | _ -> []
+
+  member __.GetAllSymbolUsesInFile () = checkResults.GetAllUsesOfAllSymbolsInFile()
 
 
   member __.GetSemanticClassification = checkResults.GetSemanticClassification None
@@ -369,7 +389,6 @@ type FSharpCompilerServiceChecker() =
 
   }
 
-
   member __.CheckProjectInBackground = checker.CheckProjectInBackground
 
   member x.ParseProjectsForFile(file, options : seq<string * FSharpProjectOptions> ) =
@@ -437,3 +456,5 @@ type FSharpCompilerServiceChecker() =
     let! parseResult = checker.ParseFile(fileName, source, options)
     return parseResult.GetNavigationItems().Declarations
   }
+
+  member __.Compile = checker.Compile

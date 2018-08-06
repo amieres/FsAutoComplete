@@ -160,6 +160,7 @@ module CommandResponse =
       Overloads : Overload list
     }
 
+  [<CLIMutable>]
   type SymbolUseRange =
     {
       FileName: string
@@ -173,6 +174,9 @@ module CommandResponse =
       IsFromDispatchSlotImplementation : bool
       IsFromPattern : bool
       IsFromType : bool
+      SymbolFullName: string
+      SymbolDisplayName: string
+      SymbolIsLocal: bool
     }
 
   type SymbolUseResponse =
@@ -214,6 +218,9 @@ module CommandResponse =
       Message:string
       Subcategory:string
     }
+    static member IsIgnored(e:Microsoft.FSharp.Compiler.SourceCodeServices.FSharpErrorInfo) =
+        // FST-1027 support in Fake 5
+        e.ErrorNumber = 213 && e.Message.StartsWith "'paket:"
     static member OfFSharpError(e:Microsoft.FSharp.Compiler.SourceCodeServices.FSharpErrorInfo) =
       {
         FileName = e.FileName
@@ -296,6 +303,11 @@ module CommandResponse =
     Position : pos
   }
 
+  type RecordStubResponse = {
+      Text : string
+      Position : pos
+  }
+
   type Parameter = {
     Name : string
     Type : string
@@ -367,6 +379,11 @@ module CommandResponse =
   type WorkspaceLoadResponse = {
     Status: string
     }
+
+  type CompileResponse = {
+    Code: int
+    Errors: FSharpErrorInfo []
+  }
 
   let info (serialize : Serializer) (s: string) = serialize { Kind = "info"; Data = s }
 
@@ -491,7 +508,10 @@ module CommandResponse =
                       IsFromComputationExpression = su.IsFromComputationExpression
                       IsFromDispatchSlotImplementation = su.IsFromDispatchSlotImplementation
                       IsFromPattern = su.IsFromPattern
-                      IsFromType = su.IsFromType } ] |> Seq.distinct |> Seq.toList }
+                      IsFromType = su.IsFromType
+                      SymbolFullName = symbol.Symbol.FullName
+                      SymbolDisplayName = symbol.Symbol.DisplayName
+                      SymbolIsLocal = symbol.Symbol.IsPrivateToFile } ] |> Seq.distinct |> Seq.toList }
     serialize { Kind = "symboluse"; Data = su }
 
   let signatureData (serialize : Serializer) ((typ, parms) : string * ((string * string) list list) ) =
@@ -528,16 +548,29 @@ module CommandResponse =
                 }
 
   let errors (serialize : Serializer) (errors: Microsoft.FSharp.Compiler.SourceCodeServices.FSharpErrorInfo[], file: string) =
+    let errors =
+        errors
+        |> Array.filter (FSharpErrorInfo.IsIgnored >> not)
+        |> Array.map FSharpErrorInfo.OfFSharpError
     serialize { Kind = "errors";
                 Data = { File = file
-                         Errors = Array.map FSharpErrorInfo.OfFSharpError errors }}
+                         Errors = errors }}
 
   let colorizations (serialize : Serializer) (colorizations: (Range.range * SemanticClassificationType)[]) =
     // let data = [ for r, k in colorizations do
     //                yield { Range = r; Kind = Enum.GetName(typeof<SemanticClassificationType>, k) } ]
     serialize { Kind = "colorizations"; Data = [] } //TODO: Fix colorization
 
-  let findDeclaration (serialize : Serializer) (range: Range.range) =
+  let findDeclaration (serialize : Serializer) (result: FindDeclarationResult) =
+    match result with
+    | FindDeclarationResult.Range range ->
+        let data = { Line = range.StartLine; Column = range.StartColumn + 1; File = range.FileName }
+        serialize { Kind = "finddecl"; Data = data }
+    | FindDeclarationResult.ExternalDeclaration extDecl ->
+        let data = { Line = extDecl.Line; Column = extDecl.Column + 1; File = extDecl.File }
+        serialize { Kind = "finddecl"; Data = data }
+    
+  let findTypeDeclaration (serialize : Serializer) (range: Range.range) =
     let data = { Line = range.StartLine; Column = range.StartColumn + 1; File = range.FileName }
     serialize { Kind = "finddecl"; Data = data }
 
@@ -602,11 +635,18 @@ module CommandResponse =
     serialize { Kind = "namespaces"; Data = data}
 
   let unionCase (serialize : Serializer) (text : string) position =
-    let data = {
+    let data : UnionCaseResponse = {
       Text = text
       Position = position
     }
     serialize { Kind = "unionCase"; Data = data}
+
+  let recordStub (serialize : Serializer) (text : string) position =
+    let data : RecordStubResponse = {
+      Text = text
+      Position = position
+    }
+    serialize { Kind = "recordStub"; Data = data}
 
   let unusedDeclarations (serialize : Serializer) data =
     let data =
@@ -627,4 +667,7 @@ module CommandResponse =
       SimplifiedName.Names = data |> Seq.map (fun (r,n) -> { SimplifiedNameData.RelativeName = n; SimplifiedNameData.UnnecessaryRange =r }) |> Seq.toArray
     }
     serialize { Kind = "simpifiedNames"; Data = data}
+
+  let compile (serialize : Serializer) (errors,code) =
+    serialize { Kind = "compile"; Data = {Code = code; Errors = Array.map FSharpErrorInfo.OfFSharpError errors}}
 

@@ -24,6 +24,9 @@ type State =
     NavigationDeclarations : ConcurrentDictionary<SourceFilePath, FSharpNavigationTopLevelDeclaration[]>
     CancellationTokens: ConcurrentDictionary<SourceFilePath, CancellationTokenSource list>
     BackgroundProjects: SimplePriorityQueue<FSharpProjectOptions, int>
+
+    mutable WorkspaceRoot: string
+
     mutable ColorizationOutput: bool
   }
 
@@ -38,6 +41,7 @@ type State =
       CancellationTokens = ConcurrentDictionary()
       NavigationDeclarations = ConcurrentDictionary()
       BackgroundProjects = SimplePriorityQueue<_, _>()
+      WorkspaceRoot = Environment.CurrentDirectory
       ColorizationOutput = false }
 
   member x.GetCheckerOptions(file: SourceFilePath, lines: LineStr[]) : FSharpProjectOptions option =
@@ -69,7 +73,8 @@ type State =
     let opts=
         defaultArg (Environment.fsharpCoreOpt  |> Option.map (fun path -> [| yield sprintf "-r:%s" path; yield "--noframework" |] )) [|"--noframework"|]
 
-    { ProjectFileName = file + ".fsproj"
+    { ProjectId = Some (file + ".fsproj")
+      ProjectFileName = file + ".fsproj"
       SourceFiles = [|file|]
       OtherOptions = opts // "--noframework"
       ReferencedProjects = [| |]

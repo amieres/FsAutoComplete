@@ -5,12 +5,11 @@ open System.IO
 open Microsoft.FSharp.Compiler.SourceCodeServices
 open FSharpLint.Application
 open FsAutoComplete.UnionPatternMatchCaseGenerator
+open FsAutoComplete.RecordStubGenerator
 open System.Threading
 open Utils
 open System.Reflection
 open Microsoft.FSharp.Compiler.Range
-
-
 
 module Response = CommandResponse
 
@@ -25,8 +24,10 @@ type Commands (serialize : Serializer) =
     let state = State.Initial
     let fsharpLintConfig = ConfigurationManager.ConfigurationManager()
     let fileParsed = Event<FSharpParseFileResults>()
+    let fileChecked = Event<FSharpParseFileResults * FSharpCheckFileResults * string>()
     let fileInProjectChecked = Event<SourceFilePath>()
     let mutable notifyErrorsInBackground = true
+    let mutable useSymbolCache = false
 
     let notify = Event<NotificationEvent>()
 
@@ -43,6 +44,15 @@ type Commands (serialize : Serializer) =
                 ()
         } |> Async.Start
 
+    let updateSymbolUsesCache (filename: FilePath) (check: FSharpCheckFileResults) =
+        async {
+            try
+                let! symbols = check.GetAllUsesOfAllSymbolsInFile()
+                SymbolCache.sendSymbols serialize filename symbols
+            with
+            | _ -> ()
+        }
+
     do fileParsed.Publish.Add (fun parseRes ->
        let decls = parseRes.GetNavigationItems().Declarations
        state.NavigationDeclarations.[parseRes.FileName] <- decls
@@ -53,30 +63,38 @@ type Commands (serialize : Serializer) =
             try
                 let opts = state.FileCheckOptions.[n]
                 let! res = checker.GetBackgroundCheckResultsForFileInProject(n, opts)
-                let checkErrors = res.GetCheckResults.Errors
-                let parseErrors = res.GetParseResults.Errors
+                fileChecked.Trigger (res.GetParseResults, res.GetCheckResults, res.FileName)
+            with
+            | _ -> ()
+        } |> Async.Start
+    )
+
+    do fileChecked.Publish.Add (fun (parse, check, file) ->
+        async {
+            try
+                let checkErrors = parse.Errors
+                let parseErrors = check.Errors
                 let errors = Array.append checkErrors parseErrors
 
-                Response.errors serialize (errors, n)
+                Response.errors serialize (errors, file)
                 |> NotificationEvent.ParseError
                 |> notify.Trigger
             with
             | _ -> ()
         }
         |> if notifyErrorsInBackground then Async.Start else ignore
+
+        updateSymbolUsesCache file check
+        |> if useSymbolCache then Async.Start else ignore
     )
 
 
     do checker.ProjectChecked.Add(fun (o, _) ->
-        state.FileCheckOptions.ToArray()
-        |> Array.tryPick(fun (KeyValue(k, v)) -> if v.ProjectFileName = Path.GetFullPath o then Some v else None )
-        |> Option.iter (fun p ->
-            state.BackgroundProjects.TryRemove(p) |> ignore
-            // printfn "BACKGROUND CHECKER - PARSED: %s" o
-            // printfn "2. BACKGROUND QUEUE: %A" (state.BackgroundProjects |> Seq.map (fun n -> n.ProjectFileName))
-
-        )
-        backgroundChecker () ) //When one project finished, start new one
+        if notifyErrorsInBackground then
+            state.FileCheckOptions.ToArray()
+            |> Array.tryPick(fun (KeyValue(_, v)) -> if v.ProjectFileName = Path.GetFullPath o then Some v else None )
+            |> Option.iter ( state.BackgroundProjects.TryRemove >> ignore)
+            backgroundChecker () ) //When one project finished, start new one
 
     let normalizeOptions (opts : FSharpProjectOptions) =
         { opts with
@@ -140,18 +158,22 @@ type Commands (serialize : Serializer) =
         response.Files
         |> parseFilesInTheBackground
         |> Async.Start
-    
+
     let getGitHash () =
         Assembly.GetEntryAssembly().GetCustomAttributes(typeof<AssemblyMetadataAttribute>, true)
         |> Seq.cast<AssemblyMetadataAttribute>
         |> Seq.map (fun (m) -> m.Key,m.Value)
         |> Seq.tryPick (fun (x,y) -> if x = "githash" && not (String.IsNullOrWhiteSpace(y)) then Some y else None )
-    
+
     member __.Notify = notify.Publish
 
     member __.NotifyErrorsInBackground
         with get() = notifyErrorsInBackground
         and set(value) = notifyErrorsInBackground <- value
+
+    member __.UseSymbolCache
+        with get() = useSymbolCache
+        and set(value) = useSymbolCache <- value
 
     member private x.SerializeResultAsync (successToString: Serializer -> 'a -> Async<string>, ?failureToString: Serializer -> string -> string) =
         Async.bind <| function
@@ -195,6 +217,7 @@ type Commands (serialize : Serializer) =
                             match checkResults with
                             | FSharpCheckFileAnswer.Aborted -> [Response.info serialize "Parse aborted"]
                             | FSharpCheckFileAnswer.Succeeded results ->
+                                do fileChecked.Trigger (parseResult, results, fileName)
                                 let errors = Array.append results.Errors parseResult.Errors
                                 if colorizations then
                                     [ Response.errors serialize (errors, fileName)
@@ -370,6 +393,7 @@ type Commands (serialize : Serializer) =
 
                     //Init cache for current list
                     state.Declarations.Clear()
+                    state.HelpText.Clear()
                     state.CompletionNamespaceInsert.Clear()
                     state.CurrentAST <- tyRes.GetAST
 
@@ -427,6 +451,18 @@ type Commands (serialize : Serializer) =
                 let fsym = sym.Symbol
                 if fsym.IsPrivateToFile then
                     return Response.symbolUse serialize (sym, usages)
+                elif useSymbolCache then
+                    let! res =  SymbolCache.getSymbols fsym.FullName
+                    if res = "ERROR" then
+                        if fsym.IsInternalToProject then
+                            let opts = state.FileCheckOptions.[tyRes.FileName]
+                            let! symbols = checker.GetUsesOfSymbol (fn, [tyRes.FileName, opts] , sym.Symbol)
+                            return Response.symbolUse serialize (sym, symbols)
+                        else
+                            let! symbols = checker.GetUsesOfSymbol (fn, state.FileCheckOptions.ToArray() |> Array.map (fun (KeyValue(k, v)) -> k,v) |> Seq.ofArray, sym.Symbol)
+                            return Response.symbolUse serialize (sym, symbols)
+                    else
+                        return res
                 elif fsym.IsInternalToProject then
                     let opts = state.FileCheckOptions.[tyRes.FileName]
                     let! symbols = checker.GetUsesOfSymbol (fn, [tyRes.FileName, opts] , sym.Symbol)
@@ -444,7 +480,7 @@ type Commands (serialize : Serializer) =
 
     member x.FindTypeDeclaration (tyRes : ParseAndCheckResults) (pos: pos) lineStr =
         tyRes.TryFindTypeDeclaration pos lineStr
-        |> x.SerializeResult (Response.findDeclaration, Response.error)
+        |> x.SerializeResult (Response.findTypeDeclaration, Response.error)
         |> x.AsCancellable (Path.GetFullPath tyRes.FileName)
 
     member x.Methods (tyRes : ParseAndCheckResults) (pos: pos) (lines: LineStr[]) =
@@ -595,8 +631,32 @@ type Commands (serialize : Serializer) =
                 return [Response.info serialize "Union at position not found"]
         } |> x.AsCancellable (Path.GetFullPath tyRes.FileName)
 
+    member x.GetRecordStub (tyRes : ParseAndCheckResults) (pos: pos) (lines: LineStr[]) (line: LineStr) =
+        async {
+            let codeGenServer = CodeGenerationService(checker, state)
+            let doc = {
+                Document.LineCount = lines.Length
+                FullName = tyRes.FileName
+                GetText = fun _ -> lines |> String.concat "\n"
+                GetLineText0 = fun i -> lines.[i]
+                GetLineText1 = fun i -> lines.[i - 1]
+            }
+
+            let! res = tryFindRecordDefinitionFromPos codeGenServer pos doc
+            match res with
+            | None -> return [Response.info serialize "Record at position not found"]
+            | Some(recordEpr, recordDefinition, insertionPos) ->
+                if shouldGenerateRecordStub recordEpr recordDefinition then
+                    let result = formatRecord insertionPos "$1" recordDefinition recordEpr.FieldExprList
+                    let pos = mkPos insertionPos.InsertionPos.Line insertionPos.InsertionPos.Column
+                    return [Response.recordStub serialize result pos]
+                else
+                    return [Response.info serialize "Record at position not found"]
+        } |> x.AsCancellable (Path.GetFullPath tyRes.FileName)
+
     member x.WorkspacePeek (dir: string) (deep: int) (excludedDirs: string list) = async {
         let d = WorkspacePeek.peek dir deep excludedDirs
+        state.WorkspaceRoot <- dir
 
         return [Response.workspacePeek serialize d]
     }
@@ -613,58 +673,57 @@ type Commands (serialize : Serializer) =
         for projectFileName, proj in projects do
             state.Projects.[projectFileName] <- proj
 
-        async {
-            let projectLoadedSuccessfully projectFileName response =
-                let project =
-                    match state.Projects.TryFind projectFileName with
-                    | Some prj -> prj
-                    | None ->
-                        let proj = new Project(projectFileName, onChange)
-                        state.Projects.[projectFileName] <- proj
-                        proj
+        let projectLoadedSuccessfully projectFileName response =
+            let project =
+                match state.Projects.TryFind projectFileName with
+                | Some prj -> prj
+                | None ->
+                    let proj = new Project(projectFileName, onChange)
+                    state.Projects.[projectFileName] <- proj
+                    proj
 
-                project.Response <- Some response
+            project.Response <- Some response
 
-                onProjectLoaded projectFileName response
+            onProjectLoaded projectFileName response
 
-            let rec onLoaded p =
-                match p with
-                | WorkspaceProjectState.Loading projectFileName ->
-                    Response.projectLoading serialize projectFileName
-                    |> NotificationEvent.Workspace
-                    |> notify.Trigger
-                | WorkspaceProjectState.Loaded (opts, extraInfo, projectFiles, logMap) ->
-                    let projectFileName, response = x.ToProjectCache(opts, extraInfo, projectFiles, logMap)
-                    projectLoadedSuccessfully projectFileName response
-                    Response.project serialize (projectFileName, response.Files, response.OutFile, response.References, response.Log, response.ExtraInfo, Map.empty)
-                    |> NotificationEvent.Workspace
-                    |> notify.Trigger
-                | WorkspaceProjectState.Failed (projectFileName, error) ->
-                    Response.projectError serialize error
-                    |> NotificationEvent.Workspace
-                    |> notify.Trigger
+        let rec onLoaded p =
+            match p with
+            | WorkspaceProjectState.Loading projectFileName ->
+                Response.projectLoading serialize projectFileName
+                |> NotificationEvent.Workspace
+                |> notify.Trigger
+            | WorkspaceProjectState.Loaded (opts, extraInfo, projectFiles, logMap) ->
+                let projectFileName, response = x.ToProjectCache(opts, extraInfo, projectFiles, logMap)
+                projectLoadedSuccessfully projectFileName response
+                Response.project serialize (projectFileName, response.Files, response.OutFile, response.References, response.Log, response.ExtraInfo, Map.empty)
+                |> NotificationEvent.Workspace
+                |> notify.Trigger
+            | WorkspaceProjectState.Failed (projectFileName, error) ->
+                Response.projectError serialize error
+                |> NotificationEvent.Workspace
+                |> notify.Trigger
 
-            Response.workspaceLoad serialize false
-            |> NotificationEvent.Workspace
-            |> notify.Trigger
+        Response.workspaceLoad serialize false
+        |> NotificationEvent.Workspace
+        |> notify.Trigger
 
-            // this is to delay the project loading notification (of this thread)
-            // after the workspaceload started response returned below in outer async
-            // Make test output repeteable, and notification in correct order
-            match Environment.workspaceLoadDelay() with
-            | delay when delay > TimeSpan.Zero ->
-                do! Async.Sleep(Environment.workspaceLoadDelay().TotalMilliseconds |> int)
-            | _ -> ()
+        // this is to delay the project loading notification (of this thread)
+        // after the workspaceload started response returned below in outer async
+        // Make test output repeteable, and notification in correct order
+        match Environment.workspaceLoadDelay() with
+        | delay when delay > TimeSpan.Zero ->
+            do! Async.Sleep(Environment.workspaceLoadDelay().TotalMilliseconds |> int)
+        | _ -> ()
 
-            do! Workspace.loadInBackground onLoaded false files
+        do! Workspace.loadInBackground onLoaded false (projects |> List.map snd)
 
-            Response.workspaceLoad serialize true
-            |> NotificationEvent.Workspace
-            |> notify.Trigger
+        Response.workspaceLoad serialize true
+        |> NotificationEvent.Workspace
+        |> notify.Trigger
 
-        } |> Async.Start
 
-        return [Response.workspaceLoad serialize false]
+
+        return [Response.workspaceLoad serialize true]
     }
 
     member x.GetUnusedDeclarations file =
@@ -714,9 +773,55 @@ type Commands (serialize : Serializer) =
                     return [ Response.unusedOpens serialize (unused |> List.toArray) ]
         } |> x.AsCancellable file
 
+    member x.Compile projectFileName = async {
+        let projectFileName = Path.GetFullPath projectFileName
+        match state.Projects.TryFind projectFileName with
+        | None -> return [ Response.info serialize "Project not found" ]
+        | Some proj ->
+        match proj.Response with
+        | None -> return [ Response.info serialize "Project not found" ]
+        | Some proj ->
+            let! errors,code = checker.Compile(proj.Options.OtherOptions)
+            return [ Response.compile serialize (errors,code)]
+    }
+
+    member __.BuildSymbolCacheForProject proj =
+        match state.Projects.TryFind proj with
+        | None -> ()
+        | Some pr ->
+            match pr.Response with
+            | None -> ()
+            | Some r ->
+                SymbolCache.buildProjectCache serialize r.Options
+                |> Async.Start
+
+    member __.BuildBackgroundSymbolsCache () =
+        async {
+            let start = DateTime.Now
+            SymbolCache.startCache state.WorkspaceRoot
+            do! Async.Sleep 100
+            let r =
+                state.Projects.Values
+                |> Seq.fold (fun acc n ->
+                    let s =
+                        match n.Response with
+                        | None -> async.Return ()
+                        | Some r ->
+                            SymbolCache.buildProjectCache serialize r.Options
+                    acc |> Async.bind (fun _ -> s )
+                    ) (async.Return ())
+            do! r
+            let finish = DateTime.Now
+            printfn "[Symbol Cache] Building background cache took %fms" (finish-start).TotalMilliseconds
+        }
+
+
+    member x.EnableSymbolCache () =
+        x.UseSymbolCache <- true
+
     member x.GetGitHash =
         let hash = getGitHash()
-        match hash with 
+        match hash with
         | Some hash -> hash
         | None -> ""
 

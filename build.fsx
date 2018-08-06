@@ -33,12 +33,12 @@ let releaseArchiveNetCore = "bin" </> "pkgs" </> "fsautocomplete.netcore.zip"
 // Pattern specifying assemblies to be tested using NUnit
 let testAssemblies = "**/bin/*/*Tests*.dll"
 
-if Environment.OSVersion.Platform = PlatformID.Win32NT then
-  MSBuildDefaults <- {MSBuildDefaults with ToolsVersion = Some "14.0"}
-
 Target "BuildDebug" (fun _ ->
-  MSBuildDebug "" "Build" ["./FsAutoComplete.sln"]
-  |> Log "Build-Output: "
+  DotNetCli.Build (fun p ->
+     { p with
+         Project = "FsAutoComplete.sln"
+         Configuration = "Debug"
+         AdditionalArgs = [ "/p:SourceLinkCreate=true" ] })
 
   DotNetCli.Build (fun p ->
      { p with
@@ -47,8 +47,10 @@ Target "BuildDebug" (fun _ ->
 )
 
 Target "BuildRelease" (fun _ ->
-  MSBuildRelease "" "Rebuild" ["./FsAutoComplete.sln"]
-  |> Log "Build-Output: "
+  DotNetCli.Build (fun p ->
+     { p with
+         Project = "FsAutoComplete.sln"
+         AdditionalArgs = [ "/p:SourceLinkCreate=true" ] })
 
   DotNetCli.Build (fun p ->
      { p with
@@ -254,16 +256,16 @@ Target "IntegrationTestHttpModeNetCore" (fun _ ->
   runall { Mode = HttpMode; Runtime = NETCoreFDD }
 )
 
-Target "UnitTest" (fun _ ->
-    trace "Running Unit tests."
-    !! testAssemblies
-    |> NUnit3 (fun p ->
-        { p with
-            ShadowCopy = true
-            TimeOut = TimeSpan.FromMinutes 10.
-            OutputDir = "TestResults.xml" })
-    trace "Done Unit tests."
-)
+// Target "UnitTest" (fun _ ->
+//     trace "Running Unit tests."
+//     !! testAssemblies
+//     |> NUnit3 (fun p ->
+//         { p with
+//             ShadowCopy = true
+//             TimeOut = TimeSpan.FromMinutes 10.
+//             OutputDir = "TestResults.xml" })
+//     trace "Done Unit tests."
+// )
 
 
 
@@ -295,11 +297,10 @@ Target "LocalRelease" (fun _ ->
     ensureDirectory "bin/release"
     CleanDirs [ "bin/release"; "bin/release_netcore" ]
 
-    CopyFiles "bin/release"(
-        !! (buildReleaseDir      + "/*.dll")
-        ++ (buildReleaseDir      + "/*.exe")
-        ++ (buildReleaseDir      + "/*.exe.config")
-    )
+    DotNetCli.Publish (fun p ->
+       { p with
+           Output = __SOURCE_DIRECTORY__ </> "bin/release"
+           Project = "src/FsAutoComplete" })
 
     CleanDirs [ "bin/release_netcore" ]
     DotNetCli.Publish (fun p ->
@@ -354,20 +355,20 @@ Target "All" id
 
 "BuildDebug"
   ==> "Build"
-  ==> "UnitTest"
+  // ==> "UnitTest"
 
-"UnitTest" ==> "Test"
+// "UnitTest" ==> "Test"
 "IntegrationTest" ==> "Test"
 
 "IntegrationTestStdioMode" ==> "IntegrationTest"
-"IntegrationTestHttpMode" ==> "IntegrationTest"
-"IntegrationTestStdioModeNetCore" =?> ("IntegrationTest", ((environVar "FSAC_TESTSUITE_NETCORE_MODE_STDIO") <> "0"))
-"IntegrationTestHttpModeNetCore" =?> ("IntegrationTest", ((environVar "FSAC_TESTSUITE_NETCORE_MODE_HTTP") <> "0"))
+// "IntegrationTestHttpMode" ==> "IntegrationTest"
+// "IntegrationTestStdioModeNetCore" =?> ("IntegrationTest", ((environVar "FSAC_TESTSUITE_NETCORE_MODE_STDIO") <> "0"))
+// "IntegrationTestHttpModeNetCore" =?> ("IntegrationTest", ((environVar "FSAC_TESTSUITE_NETCORE_MODE_HTTP") <> "0"))
 
 "BuildDebug" ==> "All"
 "Test" ==> "All"
 
-"BuildRelease" ==> "LocalRelease"
+"AssemblyInfo" ==> "LocalRelease"
 "LocalRelease" ==> "ReleaseArchive"
 
 "AssemblyInfo"

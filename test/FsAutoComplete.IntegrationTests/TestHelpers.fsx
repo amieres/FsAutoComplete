@@ -51,7 +51,7 @@ let fsacExePath () =
                     "../../src/FsAutoComplete.netcore/bin/Debug/netcoreapp2.0/publish_native/fsautocomplete")
   | FSACRuntime.NET ->
     IO.Path.Combine(__SOURCE_DIRECTORY__,
-                    "../../src/FsAutoComplete/bin/Debug/fsautocomplete.exe")
+                    "../../src/FsAutoComplete/bin/Debug/net461/fsautocomplete.exe")
 
 let configureFSACArgs (startInfo: ProcessStartInfo) =
     startInfo.FileName <-
@@ -201,7 +201,7 @@ let listenWs onMessage port action ct = async {
 
   do! ws.ConnectAsync(System.Uri(address), ct) |> Async.AwaitTask
 
-  let rec receive receivedBytes = async {
+  let rec receive (receivedBytes : ArraySegment<_>) = async {
       let! result = ws.ReceiveAsync(receivedBytes, ct) |> Async.AwaitTask
       let currentBuffer = moveBuffer receivedBytes result.Count
       if result.EndOfMessage then
