@@ -381,8 +381,9 @@ type FSharpCompilerServiceChecker() =
     let opts =
       rawOptions.OtherOptions
       |> Array.append defines
-      |> ensureCorrectFSharpCore
-      |> ensureCorrectVersions
+      |> FSharpCompilerServiceCheckerHelper.ensureCorrectFSharpCore
+      |> FSharpCompilerServiceCheckerHelper.ensureCorrectVersions
+      |> FSharpCompilerServiceCheckerHelper.ensureCorrectVersions
 
     return { rawOptions with OtherOptions = opts }
 #endif
